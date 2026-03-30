@@ -15,9 +15,11 @@ local LocalPlayer = Players.LocalPlayer
 -- [[ CONFIGURATION ]]
 local Config = {
     TweenSpeed = 400,            
+	MaxOrbDistance = 1300,
+	MaxOrbHeightDiff = 100,
     PortalTweenSpeed = 150,      
     LeaveTweenSpeed = 60,       
-    MaxFarmDistance = 200,       
+    MaxFarmDistance = 1750,       
     WaitBeforeTween = 0.5,
     DoubleCheckDistance = 20,    -- ระยะที่ถ้า "ใกล้กว่า 20" ให้ Tween ซ้ำเพื่อย้ำจุดวาร์ป
     BossNames = {"Boss1", "Boss2", "Boss3"},
@@ -69,22 +71,71 @@ local function forceTween(targetCFrame, speedOverride, isWarpPoint)
     end
 end
 
--- ฟังก์ชันเก็บ Orb
+-- [[ IMPROVED ORB COLLECTION ]]
 local function collectOrbs()
-    local acted = false
+    local root = getRoot()
+    if not root then return false end
+    
     local orbs = workspace.__THINGS:FindFirstChild("Orbs")
-    if orbs and #orbs:GetChildren() > 0 then
-        for _, orb in pairs(orbs:GetChildren()) do
-            if orb:IsA("BasePart") then
-                forceTween(orb.CFrame, nil, false)
+    if not orbs then return false end
+    
+    local acted = false
+    local allOrbs = orbs:GetChildren()
+    
+    for _, orb in pairs(allOrbs) do
+        if orb:IsA("BasePart") then
+            local orbPos = orb.Position
+            local dist = (root.Position - orbPos).Magnitude
+            local heightDiff = math.abs(root.Position.Y - orbPos.Y)
+            
+            -- [CHECK] ต้องอยู่ในระยะที่กำหนด และ ความสูงไม่ต่างกันเกินไป
+            if dist <= Config.MaxOrbDistance and heightDiff <= Config.MaxOrbHeightDiff then
+                -- ใช้ Tween ปกติ (ไม่ต้อง Precision เพราะไม่ใช่จุดวาร์ป)
+                forceTween(orb.CFrame)
+                
+                -- ยิง Remote เก็บ Orb
                 local remote = Network:FindFirstChild("Orbs_Collect") or Network:FindFirstChild("Orbs: Collect")
-                if remote then remote:FireServer(orb.Name) end
+                if remote then 
+                    remote:FireServer(orb.Name) 
+                end
+                
                 orb:Destroy()
                 acted = true
+                
+                -- พักนิดนึงเพื่อให้ Server ทัน (ลดโอกาสโดนเตะ หรือสคริปต์ค้าง)
+                task.wait(0.01) 
             end
         end
     end
     return acted
+end
+
+-- [[ PRECISION WARP (คงเดิมตามความแม่นยำ 100%) ]]
+local function precisionWarp(targetCFrame, speedOverride)
+    local root = getRoot()
+    if not root then return end
+    
+    local speed = speedOverride or Config.TweenSpeed
+    
+    -- 1. วิ่งไปรอบแรก
+    local dist = (root.Position - targetCFrame.Position).Magnitude
+    local duration = dist / speed
+    local t = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
+    t:Play()
+    t.Completed:Wait()
+
+    -- 2. ระบบ Micro-Wiggle ย้ำ 3 รอบ (เพื่อให้เข้าประตูแน่ๆ)
+    for i = 1, 3 do
+        if (root.Position - targetCFrame.Position).Magnitude < Config.WarpCheckDistance then
+            root.CFrame = targetCFrame * CFrame.new(0, 0, 0.1) 
+            task.wait(0.05)
+            root.CFrame = targetCFrame * CFrame.new(0, 0, -0.1)
+            task.wait(0.05)
+            local quick = TweenService:Create(root, TweenInfo.new(0.1), {CFrame = targetCFrame})
+            quick:Play()
+            quick.Completed:Wait()
+        end
+    end
 end
 
 -- ฟังก์ชันกด E
