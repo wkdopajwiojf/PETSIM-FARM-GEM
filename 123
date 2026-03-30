@@ -1,4 +1,9 @@
--- Pet Simulator 99: Ultimate Lucky Raid (Logic 1-4 + Custom Leave Speed)
+-- [[ ANTI DOUBLE-RUN CHECK ]]
+if _G.LuckyRaidStarted then 
+    warn("[System] Script is already running!")
+    return 
+end
+_G.LuckyRaidStarted = true
 
 local TweenService = game:GetService("TweenService")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -9,10 +14,12 @@ local LocalPlayer = Players.LocalPlayer
 
 -- [[ CONFIGURATION ]]
 local Config = {
-    TweenSpeed = 400,            -- ความเร็ว Tween ปกติขณะฟาร์ม
-    LeaveTweenSpeed = 65,       -- [NEW] ความเร็ว Tween เฉพาะตอนวาร์ปไปจุด Leave (ปรับได้ตามใจชอบ)
+    TweenSpeed = 400,            
+    PortalTweenSpeed = 150,      
+    LeaveTweenSpeed = 60,       
     MaxFarmDistance = 200,       
-    WaitBeforeTween = 0.5,       
+    WaitBeforeTween = 0.5,
+    DoubleCheckDistance = 20,    -- ระยะที่ถ้า "ใกล้กว่า 20" ให้ Tween ซ้ำเพื่อย้ำจุดวาร์ป
     BossNames = {"Boss1", "Boss2", "Boss3"},
     Chests = {"Tier1000Chest", "LootChest", "TitanicChest", "HugeChest"}
 }
@@ -23,26 +30,43 @@ local function getRoot()
     return char:WaitForChild("HumanoidRootPart")
 end
 
--- ฟังก์ชัน Tween แบบกำหนดความเร็วได้ (Speed Override)
-local function forceTween(targetCFrame, speedOverride)
+-- ฟังก์ชัน Tween แบบ "กดย้ำ" เมื่อถึงจุดวาร์ป
+local function forceTween(targetCFrame, speedOverride, isWarpPoint)
     local root = getRoot()
     if not root then return end
     
     local speed = speedOverride or Config.TweenSpeed
-    local distance = (root.Position - targetCFrame.Position).Magnitude
-    if distance < 1 then return end
+    
+    local function executeTween()
+        local distance = (root.Position - targetCFrame.Position).Magnitude
+        if distance < 1 then return end -- ใกล้มากแล้วไม่ต้องทำอะไร
 
-    local duration = distance / speed
-    local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
-    
-    tween:Play()
-    
-    local t = 0
-    while (root.Position - targetCFrame.Position).Magnitude > 3 and t < duration + 0.1 do
-        task.wait(0.05)
-        t = t + 0.05
+        local duration = distance / speed
+        local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
+        
+        tween:Play()
+        
+        local t = 0
+        while (root.Position - targetCFrame.Position).Magnitude > 1 and t < duration + 0.1 do
+            task.wait(0.05)
+            t = t + 0.05
+        end
+        tween:Cancel()
     end
-    tween:Cancel()
+
+    -- รันรอบแรกปกติ
+    executeTween()
+
+    -- [[ THE "DOUBLE TAP" LOGIC ]]
+    -- ถ้าเป็นจุดวาร์ป (Portal, Enter, Leave) และเราอยู่ใกล้เป้าหมาย < 20 studs
+    if isWarpPoint then
+        local currentDist = (root.Position - targetCFrame.Position).Magnitude
+        if currentDist <= Config.DoubleCheckDistance then
+            print("[System] Already near warp point, performing Re-Tween to ensure trigger...")
+            task.wait(0.1)
+            executeTween() -- Tween ย้ำเข้าไปที่จุดเดิมอีกรอบเพื่อให้มันวาร์ป
+        end
+    end
 end
 
 -- ฟังก์ชันเก็บ Orb
@@ -52,7 +76,7 @@ local function collectOrbs()
     if orbs and #orbs:GetChildren() > 0 then
         for _, orb in pairs(orbs:GetChildren()) do
             if orb:IsA("BasePart") then
-                forceTween(orb.CFrame)
+                forceTween(orb.CFrame, nil, false)
                 local remote = Network:FindFirstChild("Orbs_Collect") or Network:FindFirstChild("Orbs: Collect")
                 if remote then remote:FireServer(orb.Name) end
                 orb:Destroy()
@@ -112,14 +136,14 @@ local function farmNearestInRoom()
         end
     end
     if target then
-        forceTween(target:IsA("Model") and target:GetModelCFrame() or target.CFrame)
+        forceTween(target:IsA("Model") and target:GetModelCFrame() or target.CFrame, nil, false)
         while target.Parent == breakablesFolder do task.wait(0.5) end
         return true
     end
     return false
 end
 
--- [[ LOGIC 4: LEAVE SYSTEM WITH CUSTOM SPEED ]]
+-- Logic 4: Leave System (สั่งเป็น Warp Point เพื่อให้กดย้ำ)
 local function runLogic4()
     print("[System] Logic 4: Starting Exit Sequence...")
     task.wait(2)
@@ -128,17 +152,14 @@ local function runLogic4()
     if luckyEgg and luckyEgg:FindFirstChild("Teleports") then
         local enterPart = luckyEgg.Teleports:FindFirstChild("Enter")
         if enterPart then
-            print("[Exit] Tweening to Enter (Normal Speed)...")
-            forceTween(enterPart.CFrame) -- ใช้ความเร็วปกติ
-            task.wait(4) 
+            -- ส่ง true เพื่อบอกว่าเป็นจุดวาร์ป ให้กดย้ำถ้าอยู่ใกล้
+            forceTween(enterPart.CFrame, nil, true) 
+            task.wait(3) 
         end
-        
         local leavePart = luckyEgg.Teleports:FindFirstChild("Leave")
         if leavePart then
-            print("[Exit] Tweening to Leave (Custom Speed: " .. Config.LeaveTweenSpeed .. ")...")
-            -- ใช้ความเร็วที่ตั้งไว้ใน LeaveTweenSpeed โดยเฉพาะ
-            forceTween(leavePart.CFrame, Config.LeaveTweenSpeed) 
-            print("[Exit] Leaving Raid...")
+            -- ส่ง true เพื่อบอกว่าเป็นจุดวาร์ป ให้กดย้ำถ้าอยู่ใกล้
+            forceTween(leavePart.CFrame, Config.LeaveTweenSpeed, true) 
         end
     end
 end
@@ -151,7 +172,7 @@ local function startBossPhase()
         if luckyRaid then
             local room = luckyRaid.Rooms:FindFirstChild(bossName)
             local anchor = room and room.BREAK_ZONES:FindFirstChild(bossName)
-            if anchor then forceTween(anchor.CFrame) task.wait(1) end
+            if anchor then forceTween(anchor.CFrame, nil, false) task.wait(1) end
         end
         local retry = 0
         while retry < 10 do
@@ -165,13 +186,12 @@ local function startBossPhase()
         end
     end
     
-    -- เปิดหีบ
     local interactPath = luckyRaid and luckyRaid:FindFirstChild("INTERACT")
     if interactPath then
         for _, chestName in ipairs(Config.Chests) do
             local chest = interactPath:FindFirstChild(chestName)
             if chest then
-                forceTween(chest:IsA("Model") and chest:GetModelCFrame() or chest.CFrame)
+                forceTween(chest:IsA("Model") and chest:GetModelCFrame() or chest.CFrame, nil, false)
                 task.wait(0.5)
                 pressE()
                 task.wait(2.5) 
@@ -193,7 +213,8 @@ local function main()
                 Network.Raids_Init:InvokeServer({["Difficulty"] = currentLevel, ["Portal"] = targetPortal, ["PartyMode"] = 1})
                 task.wait(Config.WaitBeforeTween)
                 local portalsPath = active.LuckyEventWorld.INTERACT.RaidPortals
-                forceTween(portalsPath[tostring(targetPortal)].Enter.CFrame)
+                -- ส่ง true เพื่อบอกว่าเป็นจุดวาร์ป ให้กดย้ำถ้าอยู่ใกล้ < 20
+                forceTween(portalsPath[tostring(targetPortal)].Enter.CFrame, Config.PortalTweenSpeed, true)
                 while active:FindFirstChild("LuckyEventWorld") do task.wait(1) end
             end
         elseif active and active:FindFirstChild("LuckyRaid") then
@@ -207,7 +228,7 @@ local function main()
                     for _, v in pairs(breakablesFolder:GetChildren()) do
                         local pos = v:IsA("Model") and v:GetModelCFrame() or (v:IsA("BasePart") and v.CFrame)
                         if pos and (getRoot().Position - pos.Position).Magnitude <= Config.MaxFarmDistance then
-                            forceTween(pos)
+                            forceTween(pos, nil, false)
                             acted = true break
                         end
                     end
