@@ -1,0 +1,224 @@
+-- Pet Simulator 99: Ultimate Lucky Raid (Logic 1-4 + Custom Leave Speed)
+
+local TweenService = game:GetService("TweenService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local Network = ReplicatedStorage:WaitForChild("Network")
+local Players = game:GetService("Players")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local LocalPlayer = Players.LocalPlayer
+
+-- [[ CONFIGURATION ]]
+local Config = {
+    TweenSpeed = 400,            -- ความเร็ว Tween ปกติขณะฟาร์ม
+    LeaveTweenSpeed = 65,       -- [NEW] ความเร็ว Tween เฉพาะตอนวาร์ปไปจุด Leave (ปรับได้ตามใจชอบ)
+    MaxFarmDistance = 200,       
+    WaitBeforeTween = 0.5,       
+    BossNames = {"Boss1", "Boss2", "Boss3"},
+    Chests = {"Tier1000Chest", "LootChest", "TitanicChest", "HugeChest"}
+}
+
+-- [[ UTILS ]]
+local function getRoot()
+    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
+    return char:WaitForChild("HumanoidRootPart")
+end
+
+-- ฟังก์ชัน Tween แบบกำหนดความเร็วได้ (Speed Override)
+local function forceTween(targetCFrame, speedOverride)
+    local root = getRoot()
+    if not root then return end
+    
+    local speed = speedOverride or Config.TweenSpeed
+    local distance = (root.Position - targetCFrame.Position).Magnitude
+    if distance < 1 then return end
+
+    local duration = distance / speed
+    local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
+    
+    tween:Play()
+    
+    local t = 0
+    while (root.Position - targetCFrame.Position).Magnitude > 3 and t < duration + 0.1 do
+        task.wait(0.05)
+        t = t + 0.05
+    end
+    tween:Cancel()
+end
+
+-- ฟังก์ชันเก็บ Orb
+local function collectOrbs()
+    local acted = false
+    local orbs = workspace.__THINGS:FindFirstChild("Orbs")
+    if orbs and #orbs:GetChildren() > 0 then
+        for _, orb in pairs(orbs:GetChildren()) do
+            if orb:IsA("BasePart") then
+                forceTween(orb.CFrame)
+                local remote = Network:FindFirstChild("Orbs_Collect") or Network:FindFirstChild("Orbs: Collect")
+                if remote then remote:FireServer(orb.Name) end
+                orb:Destroy()
+                acted = true
+            end
+        end
+    end
+    return acted
+end
+
+-- ฟังก์ชันกด E
+local function pressE()
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
+    task.wait(0.2)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
+end
+
+-- [[ LOGIC 1 & 2: WORLD NAVIGATION ]]
+local function findEmptyPortal()
+    local activePath = workspace.__THINGS.__INSTANCE_CONTAINER:FindFirstChild("Active")
+    local worldPath = activePath and activePath:FindFirstChild("LuckyEventWorld")
+    if not worldPath then return nil end
+    local portalsPath = worldPath.INTERACT.RaidPortals
+    for i = 1, 10 do
+        local portal = portalsPath:FindFirstChild(tostring(i))
+        if portal then
+            local billboardGui = portal:FindFirstChild("Billboard") and portal.Billboard:FindFirstChild("BillboardGui")
+            if billboardGui and billboardGui.Enabled == false then return i end
+        end
+    end
+    return nil
+end
+
+local function getRaidLevel()
+    local success, result = pcall(function()
+        local titleText = LocalPlayer.PlayerGui.RaidSide.Frame.Top.Title.Text
+        local level = string.match(titleText, "Raid Level%s+(%d+)")
+        return tonumber(level)
+    end)
+    return success and result or nil
+end
+
+-- [[ LOGIC 3 & 4: RAID GAMEPLAY ]]
+local function farmNearestInRoom()
+    local breakablesFolder = workspace.__THINGS:FindFirstChild("Breakables")
+    if not breakablesFolder then return false end
+    local target = nil
+    local minSharedDist = 500 
+    for _, v in pairs(breakablesFolder:GetChildren()) do
+        local pos = v:IsA("Model") and v:GetModelCFrame() or (v:IsA("BasePart") and v.CFrame)
+        if pos then
+            local dist = (getRoot().Position - pos.Position).Magnitude
+            if dist <= minSharedDist then
+                target = v
+                minSharedDist = dist 
+            end
+        end
+    end
+    if target then
+        forceTween(target:IsA("Model") and target:GetModelCFrame() or target.CFrame)
+        while target.Parent == breakablesFolder do task.wait(0.5) end
+        return true
+    end
+    return false
+end
+
+-- [[ LOGIC 4: LEAVE SYSTEM WITH CUSTOM SPEED ]]
+local function runLogic4()
+    print("[System] Logic 4: Starting Exit Sequence...")
+    task.wait(2)
+    local luckyEgg = workspace.__THINGS:FindFirstChild("Instances") and workspace.__THINGS.Instances:FindFirstChild("LuckyEgg")
+    
+    if luckyEgg and luckyEgg:FindFirstChild("Teleports") then
+        local enterPart = luckyEgg.Teleports:FindFirstChild("Enter")
+        if enterPart then
+            print("[Exit] Tweening to Enter (Normal Speed)...")
+            forceTween(enterPart.CFrame) -- ใช้ความเร็วปกติ
+            task.wait(4) 
+        end
+        
+        local leavePart = luckyEgg.Teleports:FindFirstChild("Leave")
+        if leavePart then
+            print("[Exit] Tweening to Leave (Custom Speed: " .. Config.LeaveTweenSpeed .. ")...")
+            -- ใช้ความเร็วที่ตั้งไว้ใน LeaveTweenSpeed โดยเฉพาะ
+            forceTween(leavePart.CFrame, Config.LeaveTweenSpeed) 
+            print("[Exit] Leaving Raid...")
+        end
+    end
+end
+
+local function startBossPhase()
+    print("[System] Starting Boss Sequence...")
+    local luckyRaid = workspace.__THINGS.__INSTANCE_CONTAINER.Active:FindFirstChild("LuckyRaid")
+    for i, bossName in ipairs(Config.BossNames) do
+        Network.Raids_BossChallenge:InvokeServer(i)
+        if luckyRaid then
+            local room = luckyRaid.Rooms:FindFirstChild(bossName)
+            local anchor = room and room.BREAK_ZONES:FindFirstChild(bossName)
+            if anchor then forceTween(anchor.CFrame) task.wait(1) end
+        end
+        local retry = 0
+        while retry < 10 do
+            if farmNearestInRoom() then
+                task.wait(1.5)
+                while collectOrbs() do task.wait(0.1) end
+                break
+            end
+            task.wait(0.5)
+            retry = retry + 1
+        end
+    end
+    
+    -- เปิดหีบ
+    local interactPath = luckyRaid and luckyRaid:FindFirstChild("INTERACT")
+    if interactPath then
+        for _, chestName in ipairs(Config.Chests) do
+            local chest = interactPath:FindFirstChild(chestName)
+            if chest then
+                forceTween(chest:IsA("Model") and chest:GetModelCFrame() or chest.CFrame)
+                task.wait(0.5)
+                pressE()
+                task.wait(2.5) 
+                while collectOrbs() do task.wait(0.1) end
+            end
+        end
+    end
+    runLogic4()
+end
+
+-- [[ MAIN AUTO LOOP ]]
+local function main()
+    while true do
+        local active = workspace.__THINGS.__INSTANCE_CONTAINER:FindFirstChild("Active")
+        if active and active:FindFirstChild("LuckyEventWorld") then
+            local currentLevel = getRaidLevel()
+            local targetPortal = findEmptyPortal()
+            if currentLevel and targetPortal then
+                Network.Raids_Init:InvokeServer({["Difficulty"] = currentLevel, ["Portal"] = targetPortal, ["PartyMode"] = 1})
+                task.wait(Config.WaitBeforeTween)
+                local portalsPath = active.LuckyEventWorld.INTERACT.RaidPortals
+                forceTween(portalsPath[tostring(targetPortal)].Enter.CFrame)
+                while active:FindFirstChild("LuckyEventWorld") do task.wait(1) end
+            end
+        elseif active and active:FindFirstChild("LuckyRaid") then
+            task.wait(2)
+            local idleTime = 0
+            while active:FindFirstChild("LuckyRaid") do
+                local acted = false
+                if collectOrbs() then acted = true end
+                local breakablesFolder = workspace.__THINGS:FindFirstChild("Breakables")
+                if breakablesFolder then
+                    for _, v in pairs(breakablesFolder:GetChildren()) do
+                        local pos = v:IsA("Model") and v:GetModelCFrame() or (v:IsA("BasePart") and v.CFrame)
+                        if pos and (getRoot().Position - pos.Position).Magnitude <= Config.MaxFarmDistance then
+                            forceTween(pos)
+                            acted = true break
+                        end
+                    end
+                end
+                if acted then idleTime = 0 else idleTime = idleTime + 1 end
+                if idleTime >= 5 then startBossPhase() break end
+                task.wait(1)
+            end
+        end
+        task.wait(2)
+    end
+end
+
+task.spawn(main)
