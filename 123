@@ -3,6 +3,7 @@ local CONFIG = {
     TweenSpeed = 0.1,
     OrbRange = 300,
     OrbTweenSpeed = 0.1,
+    CustomDifficulty = nil, -- ใส่ตัวเลขเพื่อล็อค difficulty เช่น 9999 หรือใส่ nil เพื่อใช้ค่าจากเกม
 }
 
 -- ===== SERVICES =====
@@ -12,6 +13,13 @@ local TweenService = game:GetService("TweenService")
 
 -- ===== STEP 1: GET DIFFICULTY =====
 local function getDifficulty()
+    -- ถ้าตั้ง CustomDifficulty ไว้ให้ใช้ค่านั้นเลย
+    if CONFIG.CustomDifficulty then
+        print("[Raid] Using custom difficulty: " .. CONFIG.CustomDifficulty)
+        return CONFIG.CustomDifficulty
+    end
+
+    -- ไม่ได้ตั้งไว้ให้อ่านจากเกมตามปกติ
     local gui = Players.LocalPlayer.PlayerGui
     local text = gui.RaidSide.Frame.Top.Title.Text
     local level = tonumber(text:match("Raid Level (%d+)"))
