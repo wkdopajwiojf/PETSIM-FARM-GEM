@@ -328,7 +328,7 @@ local function fightBoss(bossIndex)
     print("[Raid] [BOSS] Remote fired, Result: " .. tostring(result))
 
     print("[Raid] [BOSS] Waiting for Boss " .. bossIndex .. " to spawn (attempt 1)...")
-    local bossModel = waitForBossModel(5)
+    local bossModel = waitForBossModel(2)
 
     if not bossModel then
         print("[Raid] [BOSS] Boss not found, retrying remote (attempt 2)...")
@@ -336,7 +336,7 @@ local function fightBoss(bossIndex)
             ReplicatedStorage.Network.Raids_BossChallenge:InvokeServer(bossIndex)
         end)
         print("[Raid] [BOSS] Waiting for Boss " .. bossIndex .. " to spawn (attempt 2)...")
-        bossModel = waitForBossModel(5)
+        bossModel = waitForBossModel(2)
     end
 
     if not bossModel then
@@ -399,9 +399,9 @@ local function openChests()
 
     local chestNames = {
         "LootChest",
-        "Tier1000Chest",
-        "TitanicChest",
         "HugeChest",
+        "TitanicChest",
+        "Tier1000Chest",
     }
 
     for _, chestName in pairs(chestNames) do
