@@ -1,296 +1,571 @@
--- [[ ANTI DOUBLE-RUN CHECK ]]
-if _G.LuckyRaidStarted then 
-    warn("[System] Script is already running!")
-    return 
-end
-_G.LuckyRaidStarted = true
-
-local TweenService = game:GetService("TweenService")
-local ReplicatedStorage = game:GetService("ReplicatedStorage")
-local Network = ReplicatedStorage:WaitForChild("Network")
-local Players = game:GetService("Players")
-local VirtualInputManager = game:GetService("VirtualInputManager")
-local LocalPlayer = Players.LocalPlayer
-
--- [[ CONFIGURATION ]]
-local Config = {
-    TweenSpeed = 400,            
-	MaxOrbDistance = 1300,
-	MaxOrbHeightDiff = 100,
-    PortalTweenSpeed = 150,      
-    LeaveTweenSpeed = 60,       
-    MaxFarmDistance = 1750,       
-    WaitBeforeTween = 0.5,
-    DoubleCheckDistance = 20,    -- ระยะที่ถ้า "ใกล้กว่า 20" ให้ Tween ซ้ำเพื่อย้ำจุดวาร์ป
-    BossNames = {"Boss1", "Boss2", "Boss3"},
-    Chests = {"Tier1000Chest", "LootChest", "TitanicChest", "HugeChest"}
+-- ===== CONFIG =====
+local CONFIG = {
+    TweenSpeed = 0.1,
+    OrbRange = 300,
+    OrbTweenSpeed = 0.1,
 }
 
--- [[ UTILS ]]
-local function getRoot()
-    local char = LocalPlayer.Character or LocalPlayer.CharacterAdded:Wait()
-    return char:WaitForChild("HumanoidRootPart")
-end
+-- ===== SERVICES =====
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local TweenService = game:GetService("TweenService")
 
--- ฟังก์ชัน Tween แบบ "กดย้ำ" เมื่อถึงจุดวาร์ป
-local function forceTween(targetCFrame, speedOverride, isWarpPoint)
-    local root = getRoot()
-    if not root then return end
-    
-    local speed = speedOverride or Config.TweenSpeed
-    
-    local function executeTween()
-        local distance = (root.Position - targetCFrame.Position).Magnitude
-        if distance < 1 then return end -- ใกล้มากแล้วไม่ต้องทำอะไร
-
-        local duration = distance / speed
-        local tween = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
-        
-        tween:Play()
-        
-        local t = 0
-        while (root.Position - targetCFrame.Position).Magnitude > 1 and t < duration + 0.1 do
-            task.wait(0.05)
-            t = t + 0.05
-        end
-        tween:Cancel()
-    end
-
-    -- รันรอบแรกปกติ
-    executeTween()
-
-    -- [[ THE "DOUBLE TAP" LOGIC ]]
-    -- ถ้าเป็นจุดวาร์ป (Portal, Enter, Leave) และเราอยู่ใกล้เป้าหมาย < 20 studs
-    if isWarpPoint then
-        local currentDist = (root.Position - targetCFrame.Position).Magnitude
-        if currentDist <= Config.DoubleCheckDistance then
-            print("[System] Already near warp point, performing Re-Tween to ensure trigger...")
-            task.wait(0.1)
-            executeTween() -- Tween ย้ำเข้าไปที่จุดเดิมอีกรอบเพื่อให้มันวาร์ป
-        end
+-- ===== STEP 1: GET DIFFICULTY =====
+local function getDifficulty()
+    local gui = Players.LocalPlayer.PlayerGui
+    local text = gui.RaidSide.Frame.Top.Title.Text
+    local level = tonumber(text:match("Raid Level (%d+)"))
+    if level then
+        print("[Raid] Difficulty found: " .. level)
+        return level
+    else
+        warn("[Raid] Could not parse difficulty from: " .. tostring(text))
+        return nil
     end
 end
 
--- [[ IMPROVED ORB COLLECTION ]]
-local function collectOrbs()
-    local root = getRoot()
-    if not root then return false end
-    
-    local orbs = workspace.__THINGS:FindFirstChild("Orbs")
-    if not orbs then return false end
-    
-    local acted = false
-    local allOrbs = orbs:GetChildren()
-    
-    for _, orb in pairs(allOrbs) do
-        if orb:IsA("BasePart") then
-            local orbPos = orb.Position
-            local dist = (root.Position - orbPos).Magnitude
-            local heightDiff = math.abs(root.Position.Y - orbPos.Y)
-            
-            -- [CHECK] ต้องอยู่ในระยะที่กำหนด และ ความสูงไม่ต่างกันเกินไป
-            if dist <= Config.MaxOrbDistance and heightDiff <= Config.MaxOrbHeightDiff then
-                -- ใช้ Tween ปกติ (ไม่ต้อง Precision เพราะไม่ใช่จุดวาร์ป)
-                forceTween(orb.CFrame)
-                
-                -- ยิง Remote เก็บ Orb
-                local remote = Network:FindFirstChild("Orbs_Collect") or Network:FindFirstChild("Orbs: Collect")
-                if remote then 
-                    remote:FireServer(orb.Name) 
-                end
-                
-                orb:Destroy()
-                acted = true
-                
-                -- พักนิดนึงเพื่อให้ Server ทัน (ลดโอกาสโดนเตะ หรือสคริปต์ค้าง)
-                task.wait(0.01) 
-            end
-        end
+-- ===== STEP 1: FIND AVAILABLE PORTAL =====
+local function findAvailablePortal()
+    local success, portals = pcall(function()
+        return workspace.__THINGS.__INSTANCE_CONTAINER.Active.LuckyEventWorld.INTERACT.RaidPortals
+    end)
+    if not success or not portals then
+        warn("[Raid] LuckyEventWorld not found, not in zone yet...")
+        return nil
     end
-    return acted
-end
 
--- [[ PRECISION WARP (คงเดิมตามความแม่นยำ 100%) ]]
-local function precisionWarp(targetCFrame, speedOverride)
-    local root = getRoot()
-    if not root then return end
-    
-    local speed = speedOverride or Config.TweenSpeed
-    
-    -- 1. วิ่งไปรอบแรก
-    local dist = (root.Position - targetCFrame.Position).Magnitude
-    local duration = dist / speed
-    local t = TweenService:Create(root, TweenInfo.new(duration, Enum.EasingStyle.Linear), {CFrame = targetCFrame})
-    t:Play()
-    t.Completed:Wait()
-
-    -- 2. ระบบ Micro-Wiggle ย้ำ 3 รอบ (เพื่อให้เข้าประตูแน่ๆ)
-    for i = 1, 3 do
-        if (root.Position - targetCFrame.Position).Magnitude < Config.WarpCheckDistance then
-            root.CFrame = targetCFrame * CFrame.new(0, 0, 0.1) 
-            task.wait(0.05)
-            root.CFrame = targetCFrame * CFrame.new(0, 0, -0.1)
-            task.wait(0.05)
-            local quick = TweenService:Create(root, TweenInfo.new(0.1), {CFrame = targetCFrame})
-            quick:Play()
-            quick.Completed:Wait()
-        end
-    end
-end
-
--- ฟังก์ชันกด E
-local function pressE()
-    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.E, false, game)
-    task.wait(0.2)
-    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.E, false, game)
-end
-
--- [[ LOGIC 1 & 2: WORLD NAVIGATION ]]
-local function findEmptyPortal()
-    local activePath = workspace.__THINGS.__INSTANCE_CONTAINER:FindFirstChild("Active")
-    local worldPath = activePath and activePath:FindFirstChild("LuckyEventWorld")
-    if not worldPath then return nil end
-    local portalsPath = worldPath.INTERACT.RaidPortals
     for i = 1, 10 do
-        local portal = portalsPath:FindFirstChild(tostring(i))
+        local portal = portals[tostring(i)]
         if portal then
-            local billboardGui = portal:FindFirstChild("Billboard") and portal.Billboard:FindFirstChild("BillboardGui")
-            if billboardGui and billboardGui.Enabled == false then return i end
+            local ok, enabled = pcall(function()
+                return portal.Billboard.BillboardGui.Enabled
+            end)
+            if ok then
+                if not enabled then
+                    print("[Raid] Portal " .. i .. " is available ✓")
+                    return i
+                else
+                    print("[Raid] Portal " .. i .. " is occupied, skipping...")
+                end
+            else
+                print("[Raid] Portal " .. i .. " could not be read, skipping...")
+            end
+        else
+            print("[Raid] Portal " .. i .. " does not exist, skipping...")
+        end
+    end
+    warn("[Raid] No available portals found!")
+    return nil
+end
+
+-- ===== STEP 1: CREATE OWN RAID (retry until success) =====
+local function createOwnRaid()
+    print("[Raid] ===== Step 1: Creating Raid =====")
+    while true do
+        -- ดึง difficulty ใหม่ทุกรอบ
+        local difficulty = getDifficulty()
+        if not difficulty then
+            warn("[Raid] Could not get difficulty, retrying in 3s...")
+            task.wait(3)
+            continue
+        end
+
+        -- สแกนหาประตูว่างใหม่ทุกรอบ
+        local portalIndex = findAvailablePortal()
+        if not portalIndex then
+            warn("[Raid] No available portal, retrying in 3s...")
+            task.wait(3)
+            continue
+        end
+
+        print("[Raid] Invoking Raids_Init with Difficulty=" .. difficulty .. ", Portal=" .. portalIndex)
+        local success, result = pcall(function()
+            return ReplicatedStorage.Network.Raids_Init:InvokeServer({
+                ["Difficulty"] = difficulty,
+                ["Portal"] = portalIndex,
+                ["PartyMode"] = 1
+            })
+        end)
+
+        if success and result then
+            print("[Raid] Raid created successfully! Result: " .. tostring(result))
+            return portalIndex
+        else
+            warn("[Raid] InvokeServer failed: " .. tostring(result) .. ", retrying in 3s...")
+            task.wait(3)
+            -- วนกลับไปดึง difficulty และ portal ใหม่อีกรอบ
+        end
+    end
+end
+
+-- ===== STEP 2: TWEEN TO PORTAL (retry until success) =====
+local function tweenToPortal(portalIndex)
+    print("[Raid] ===== Step 2: Teleporting to Portal =====")
+    while true do
+        local character = Players.LocalPlayer.Character or Players.LocalPlayer.CharacterAdded:Wait()
+        local hrp = character:WaitForChild("HumanoidRootPart")
+
+        local portals = workspace.__THINGS.__INSTANCE_CONTAINER.Active.LuckyEventWorld.INTERACT.RaidPortals
+        local enterPart
+        local success = pcall(function()
+            enterPart = portals[tostring(portalIndex)].Enter
+        end)
+
+        if not success or not enterPart then
+            warn("[Raid] Enter part not found for portal " .. portalIndex .. ", retrying in 3s...")
+            task.wait(3)
+            continue
+        end
+
+        print("[Raid] Tweening to Portal " .. portalIndex .. " Enter part (Speed: " .. CONFIG.TweenSpeed .. "s)...")
+        local tweenInfo = TweenInfo.new(CONFIG.TweenSpeed, Enum.EasingStyle.Linear, Enum.EasingDirection.In, -1)
+        local tween = TweenService:Create(hrp, tweenInfo, { CFrame = enterPart.CFrame })
+        tween:Play()
+        print("[Raid] Tween started, waiting for Enter part to disappear...")
+
+        enterPart.AncestryChanged:Connect(function()
+            if not enterPart:IsDescendantOf(workspace) then
+                tween:Cancel()
+            end
+        end)
+
+        repeat task.wait(0.1) until not enterPart:IsDescendantOf(workspace)
+        tween:Cancel()
+        print("[Raid] Successfully entered Portal " .. portalIndex .. " ✓")
+        return true
+    end
+end
+
+-- ===== HELPER: GET HRP =====
+local function getHRP()
+    local character = Players.LocalPlayer.Character or Players.LocalPlayer.CharacterAdded:Wait()
+    return character:WaitForChild("HumanoidRootPart")
+end
+
+-- ===== HELPER: GET MODEL POSITION =====
+local function getModelPosition(model)
+    if model.PrimaryPart then
+        return model.PrimaryPart.Position
+    end
+    for _, part in pairs(model:GetDescendants()) do
+        if part:IsA("BasePart") then
+            return part.Position
         end
     end
     return nil
 end
 
-local function getRaidLevel()
-    local success, result = pcall(function()
-        local titleText = LocalPlayer.PlayerGui.RaidSide.Frame.Top.Title.Text
-        local level = string.match(titleText, "Raid Level%s+(%d+)")
-        return tonumber(level)
+-- ===== HELPER: TWEEN TO TARGET แล้วค้างไว้ =====
+local function tweenToTarget(hrp, getTargetCFrame, isGone)
+    local running = true
+    task.spawn(function()
+        while running do
+            local tween = TweenService:Create(hrp, TweenInfo.new(CONFIG.TweenSpeed, Enum.EasingStyle.Linear), {
+                CFrame = getTargetCFrame()
+            })
+            tween:Play()
+            task.wait(CONFIG.TweenSpeed)
+        end
     end)
-    return success and result or nil
+    repeat task.wait(0.1) until isGone()
+    running = false
+    print("[Raid] Target gone, stopping tween ✓")
 end
 
--- [[ LOGIC 3 & 4: RAID GAMEPLAY ]]
-local function farmNearestInRoom()
-    local breakablesFolder = workspace.__THINGS:FindFirstChild("Breakables")
-    if not breakablesFolder then return false end
-    local target = nil
-    local minSharedDist = 500 
-    for _, v in pairs(breakablesFolder:GetChildren()) do
-        local pos = v:IsA("Model") and v:GetModelCFrame() or (v:IsA("BasePart") and v.CFrame)
-        if pos then
-            local dist = (getRoot().Position - pos.Position).Magnitude
-            if dist <= minSharedDist then
-                target = v
-                minSharedDist = dist 
+-- ===== HELPER: หา orb ที่ใกล้ที่สุด =====
+local function getNearestOrb(hrp)
+    local orbContainer = workspace.__THINGS.Orbs
+    local nearest = nil
+    local nearestDist = math.huge
+    for _, obj in pairs(orbContainer:GetChildren()) do
+        if (obj:IsA("MeshPart") or obj:IsA("BasePart")) and obj:IsDescendantOf(workspace) then
+            local dist = (obj.Position - hrp.Position).Magnitude
+            if dist <= CONFIG.OrbRange and dist < nearestDist then
+                nearest = obj
+                nearestDist = dist
             end
         end
     end
-    if target then
-        forceTween(target:IsA("Model") and target:GetModelCFrame() or target.CFrame, nil, false)
-        while target.Parent == breakablesFolder do task.wait(0.5) end
-        return true
-    end
-    return false
+    return nearest, nearestDist
 end
 
--- Logic 4: Leave System (สั่งเป็น Warp Point เพื่อให้กดย้ำ)
-local function runLogic4()
-    print("[System] Logic 4: Starting Exit Sequence...")
-    task.wait(2)
-    local luckyEgg = workspace.__THINGS:FindFirstChild("Instances") and workspace.__THINGS.Instances:FindFirstChild("LuckyEgg")
-    
-    if luckyEgg and luckyEgg:FindFirstChild("Teleports") then
-        local enterPart = luckyEgg.Teleports:FindFirstChild("Enter")
-        if enterPart then
-            -- ส่ง true เพื่อบอกว่าเป็นจุดวาร์ป ให้กดย้ำถ้าอยู่ใกล้
-            forceTween(enterPart.CFrame, nil, true) 
-            task.wait(3) 
-        end
-        local leavePart = luckyEgg.Teleports:FindFirstChild("Leave")
-        if leavePart then
-            -- ส่ง true เพื่อบอกว่าเป็นจุดวาร์ป ให้กดย้ำถ้าอยู่ใกล้
-            forceTween(leavePart.CFrame, Config.LeaveTweenSpeed, true) 
-        end
+-- ===== STEP 3: COLLECT ALL ORBS =====
+local function collectAllOrbs(hrp)
+    while true do
+        local orb, dist = getNearestOrb(hrp)
+        if not orb then break end
+        print("[Raid] [ORB] Collecting orb at distance " .. math.floor(dist) .. " studs...")
+        tweenToTarget(
+            hrp,
+            function()
+                if orb and orb:IsDescendantOf(workspace) then
+                    return orb.CFrame
+                end
+                return hrp.CFrame
+            end,
+            function()
+                return not orb:IsDescendantOf(workspace)
+            end
+        )
+        print("[Raid] [ORB] Orb collected ✓")
+        task.wait(0.05)
     end
+    print("[Raid] [ORB] No more orbs nearby ✓")
 end
 
-local function startBossPhase()
-    print("[System] Starting Boss Sequence...")
-    local luckyRaid = workspace.__THINGS.__INSTANCE_CONTAINER.Active:FindFirstChild("LuckyRaid")
-    for i, bossName in ipairs(Config.BossNames) do
-        Network.Raids_BossChallenge:InvokeServer(i)
-        if luckyRaid then
-            local room = luckyRaid.Rooms:FindFirstChild(bossName)
-            local anchor = room and room.BREAK_ZONES:FindFirstChild(bossName)
-            if anchor then forceTween(anchor.CFrame, nil, false) task.wait(1) end
+-- ===== STEP 3: BREAK BOXES (Orb priority) =====
+local function breakBoxes()
+    print("[Raid] ===== Step 3: Breaking Boxes =====")
+    local hrp = getHRP()
+    local lastBreakableTime = tick()
+
+    while true do
+        local orb = getNearestOrb(hrp)
+        if orb then
+            print("[Raid] [ORB] Orb detected before targeting box, collecting first...")
+            collectAllOrbs(hrp)
         end
-        local retry = 0
-        while retry < 10 do
-            if farmNearestInRoom() then
-                task.wait(1.5)
-                while collectOrbs() do task.wait(0.1) end
+
+        local breakables = workspace.__THINGS.Breakables
+        local models = {}
+        for _, obj in pairs(breakables:GetChildren()) do
+            if obj:IsA("Model") then
+                local pos = getModelPosition(obj)
+                if pos then
+                    local dist = (pos - hrp.Position).Magnitude
+                    table.insert(models, {model = obj, pos = pos, dist = dist})
+                end
+            end
+        end
+
+        if #models == 0 then
+            if tick() - lastBreakableTime >= 5 then
+                print("[Raid] No breakables for 5 seconds, proceeding to boss fight ✓")
                 break
             end
-            task.wait(0.5)
-            retry = retry + 1
+            task.wait(0.1)
+            continue
         end
-    end
-    
-    local interactPath = luckyRaid and luckyRaid:FindFirstChild("INTERACT")
-    if interactPath then
-        for _, chestName in ipairs(Config.Chests) do
-            local chest = interactPath:FindFirstChild(chestName)
-            if chest then
-                forceTween(chest:IsA("Model") and chest:GetModelCFrame() or chest.CFrame, nil, false)
-                task.wait(0.5)
-                pressE()
-                task.wait(2.5) 
-                while collectOrbs() do task.wait(0.1) end
+
+        lastBreakableTime = tick()
+        table.sort(models, function(a, b) return a.dist < b.dist end)
+        local nearest = models[1]
+        local targetModel = nearest.model
+        print("[Raid] Targeting nearest breakable: " .. targetModel.Name .. " (dist: " .. math.floor(nearest.dist) .. " studs)")
+
+        local interrupted = false
+        tweenToTarget(
+            hrp,
+            function()
+                if targetModel and targetModel.PrimaryPart then
+                    return targetModel.PrimaryPart.CFrame
+                end
+                return hrp.CFrame
+            end,
+            function()
+                if not targetModel:IsDescendantOf(workspace) then
+                    return true
+                end
+                local nearOrb = getNearestOrb(hrp)
+                if nearOrb then
+                    print("[Raid] [ORB] Orb detected while breaking box! Interrupting...")
+                    interrupted = true
+                    return true
+                end
+                return false
             end
+        )
+
+        if interrupted then
+            collectAllOrbs(hrp)
+        else
+            print("[Raid] Breakable destroyed ✓")
+            lastBreakableTime = tick()
+            collectAllOrbs(hrp)
         end
+
+        task.wait(0.05)
     end
-    runLogic4()
+
+    collectAllOrbs(hrp)
 end
 
--- [[ MAIN AUTO LOOP ]]
-local function main()
-    while true do
-        local active = workspace.__THINGS.__INSTANCE_CONTAINER:FindFirstChild("Active")
-        if active and active:FindFirstChild("LuckyEventWorld") then
-            local currentLevel = getRaidLevel()
-            local targetPortal = findEmptyPortal()
-            if currentLevel and targetPortal then
-                Network.Raids_Init:InvokeServer({["Difficulty"] = currentLevel, ["Portal"] = targetPortal, ["PartyMode"] = 1})
-                task.wait(Config.WaitBeforeTween)
-                local portalsPath = active.LuckyEventWorld.INTERACT.RaidPortals
-                -- ส่ง true เพื่อบอกว่าเป็นจุดวาร์ป ให้กดย้ำถ้าอยู่ใกล้ < 20
-                forceTween(portalsPath[tostring(targetPortal)].Enter.CFrame, Config.PortalTweenSpeed, true)
-                while active:FindFirstChild("LuckyEventWorld") do task.wait(1) end
+-- ===== STEP 4: WAIT FOR BOSS MODEL =====
+local function waitForBossModel(timeoutSeconds)
+    local breakables = workspace.__THINGS.Breakables
+    local startTime = tick()
+    while tick() - startTime < timeoutSeconds do
+        for _, obj in pairs(breakables:GetChildren()) do
+            if obj:IsA("Model") then
+                return obj
             end
-        elseif active and active:FindFirstChild("LuckyRaid") then
-            task.wait(2)
-            local idleTime = 0
-            while active:FindFirstChild("LuckyRaid") do
-                local acted = false
-                if collectOrbs() then acted = true end
-                local breakablesFolder = workspace.__THINGS:FindFirstChild("Breakables")
-                if breakablesFolder then
-                    for _, v in pairs(breakablesFolder:GetChildren()) do
-                        local pos = v:IsA("Model") and v:GetModelCFrame() or (v:IsA("BasePart") and v.CFrame)
-                        if pos and (getRoot().Position - pos.Position).Magnitude <= Config.MaxFarmDistance then
-                            forceTween(pos, nil, false)
-                            acted = true break
+        end
+        task.wait(0.1)
+    end
+    return nil
+end
+
+-- ===== STEP 4: FIGHT BOSS =====
+local function fightBoss(bossIndex)
+    print("[Raid] [BOSS] Invoking BossChallenge for Boss " .. bossIndex .. "...")
+
+    local success, result = pcall(function()
+        return ReplicatedStorage.Network.Raids_BossChallenge:InvokeServer(bossIndex)
+    end)
+
+    if not success then
+        warn("[Raid] [BOSS] InvokeServer failed: " .. tostring(result))
+        return false
+    end
+    print("[Raid] [BOSS] Remote fired, Result: " .. tostring(result))
+
+    print("[Raid] [BOSS] Waiting for Boss " .. bossIndex .. " to spawn (attempt 1)...")
+    local bossModel = waitForBossModel(5)
+
+    if not bossModel then
+        print("[Raid] [BOSS] Boss not found, retrying remote (attempt 2)...")
+        pcall(function()
+            ReplicatedStorage.Network.Raids_BossChallenge:InvokeServer(bossIndex)
+        end)
+        print("[Raid] [BOSS] Waiting for Boss " .. bossIndex .. " to spawn (attempt 2)...")
+        bossModel = waitForBossModel(5)
+    end
+
+    if not bossModel then
+        warn("[Raid] [BOSS] Boss " .. bossIndex .. " did not spawn after 2 attempts, skipping...")
+        return false
+    end
+
+    print("[Raid] [BOSS] Boss " .. bossIndex .. " found: " .. bossModel.Name .. ", tweening...")
+    local hrp = getHRP()
+
+    while bossModel:IsDescendantOf(workspace) do
+        local interrupted = false
+        tweenToTarget(
+            hrp,
+            function()
+                if bossModel and bossModel.PrimaryPart then
+                    return bossModel.PrimaryPart.CFrame
+                end
+                return hrp.CFrame
+            end,
+            function()
+                if not bossModel:IsDescendantOf(workspace) then
+                    return true
+                end
+                local nearOrb = getNearestOrb(hrp)
+                if nearOrb then
+                    print("[Raid] [ORB] Orb detected while fighting boss! Interrupting...")
+                    interrupted = true
+                    return true
+                end
+                return false
+            end
+        )
+        if interrupted then
+            collectAllOrbs(hrp)
+        end
+    end
+
+    collectAllOrbs(hrp)
+    print("[Raid] [BOSS] Boss " .. bossIndex .. " defeated ✓")
+    return true
+end
+
+-- ===== STEP 4: FIGHT ALL BOSSES =====
+local function fightAllBosses()
+    print("[Raid] ===== Step 4: Boss Fight =====")
+    for i = 1, 3 do
+        print("[Raid] [BOSS] Starting Boss " .. i .. "...")
+        fightBoss(i)
+        task.wait(0.5)
+    end
+    print("[Raid] [BOSS] All bosses done ✓")
+end
+
+-- ===== STEP 5: OPEN CHESTS =====
+local function openChests()
+    print("[Raid] ===== Step 5: Opening Chests =====")
+    local hrp = getHRP()
+    local interactPath = workspace.__THINGS.__INSTANCE_CONTAINER.Active.LuckyRaid.INTERACT
+
+    local chestNames = {
+        "LootChest",
+        "Tier1000Chest",
+        "TitanicChest",
+        "HugeChest",
+    }
+
+    for _, chestName in pairs(chestNames) do
+        local chestFolder = interactPath[chestName]
+        if not chestFolder then
+            print("[Raid] [CHEST] " .. chestName .. " not found, skipping...")
+            continue
+        end
+
+        local chestParts = {}
+        for _, obj in pairs(chestFolder:GetChildren()) do
+            if obj:IsA("BasePart") or obj:IsA("MeshPart") or obj:IsA("Model") then
+                table.insert(chestParts, obj)
+            end
+        end
+
+        if #chestParts == 0 then
+            print("[Raid] [CHEST] " .. chestName .. " has no interactable parts, skipping...")
+            continue
+        end
+
+        print("[Raid] [CHEST] Opening " .. chestName .. " (" .. #chestParts .. " chest(s))...")
+
+        for _, chestObj in pairs(chestParts) do
+            if not chestObj:IsDescendantOf(workspace) then continue end
+
+            local targetCFrame
+            if chestObj:IsA("Model") then
+                if chestObj.PrimaryPart then
+                    targetCFrame = chestObj.PrimaryPart.CFrame
+                else
+                    for _, p in pairs(chestObj:GetDescendants()) do
+                        if p:IsA("BasePart") then
+                            targetCFrame = p.CFrame
+                            break
                         end
                     end
                 end
-                if acted then idleTime = 0 else idleTime = idleTime + 1 end
-                if idleTime >= 5 then startBossPhase() break end
-                task.wait(1)
+            else
+                targetCFrame = chestObj.CFrame
             end
+
+            if not targetCFrame then continue end
+
+            print("[Raid] [CHEST] Tweening to " .. chestName .. "...")
+
+            local running = true
+            task.spawn(function()
+                while running do
+                    local tween = TweenService:Create(hrp, TweenInfo.new(CONFIG.TweenSpeed, Enum.EasingStyle.Linear), {
+                        CFrame = targetCFrame
+                    })
+                    tween:Play()
+                    task.wait(CONFIG.TweenSpeed)
+                end
+            end)
+
+            repeat
+                task.wait(0.05)
+            until (hrp.Position - targetCFrame.Position).Magnitude <= 5 or not chestObj:IsDescendantOf(workspace)
+
+            running = false
+
+            if not chestObj:IsDescendantOf(workspace) then
+                print("[Raid] [CHEST] " .. chestName .. " already gone, skipping...")
+                continue
+            end
+
+            print("[Raid] [CHEST] Pressing E to open " .. chestName .. "...")
+            keypress(0x45)
+            task.wait(0.1)
+            keyrelease(0x45)
+            task.wait(0.3)
+
+            print("[Raid] [CHEST] " .. chestName .. " opened ✓")
         end
-        task.wait(2)
     end
+
+    print("[Raid] [CHEST] All chests opened ✓")
+    task.wait(0.5)
+    collectAllOrbs(hrp)
 end
 
-task.spawn(main)
+-- ===== STEP 6: EXIT RAID =====
+local function exitRaid()
+    print("[Raid] ===== Step 6: Exiting Raid =====")
+    local hrp = getHRP()
+
+    local enterTeleport = workspace.__THINGS.Instances.LuckyEgg.Teleports.Enter
+    print("[Raid] Tweening to LuckyEgg Enter teleport...")
+    local running = true
+    task.spawn(function()
+        while running do
+            local tween = TweenService:Create(hrp, TweenInfo.new(CONFIG.TweenSpeed, Enum.EasingStyle.Linear), {
+                CFrame = enterTeleport.CFrame
+            })
+            tween:Play()
+            task.wait(CONFIG.TweenSpeed)
+        end
+    end)
+    repeat task.wait(0.05) until (hrp.Position - enterTeleport.Position).Magnitude <= 5
+    running = false
+    print("[Raid] Reached Enter teleport ✓")
+
+    print("[Raid] Waiting 5 seconds for map to load...")
+    task.wait(5)
+
+    local leaveTeleport = workspace.__THINGS.Instances.LuckyEgg.Teleports.Leave
+    print("[Raid] Tweening to LuckyEgg Leave teleport...")
+    running = true
+    task.spawn(function()
+        while running do
+            local tween = TweenService:Create(hrp, TweenInfo.new(CONFIG.TweenSpeed, Enum.EasingStyle.Linear), {
+                CFrame = leaveTeleport.CFrame
+            })
+            tween:Play()
+            task.wait(CONFIG.TweenSpeed)
+        end
+    end)
+    repeat task.wait(0.05) until (hrp.Position - leaveTeleport.Position).Magnitude <= 5
+    running = false
+    print("[Raid] Reached Leave teleport ✓")
+
+    print("[Raid] Waiting 3 seconds before next raid...")
+    task.wait(3)
+    print("[Raid] Ready for next raid ✓")
+end
+
+-- ===== ANTI DOUBLE RUN =====
+if _G.RaidBotRunning then
+    warn("[Raid] Bot is already running! Stopping duplicate.")
+    return
+end
+_G.RaidBotRunning = true
+
+-- ===== MAIN LOOP =====
+local raidCount = 0
+local success, err = pcall(function()
+    while true do
+        raidCount = raidCount + 1
+        print("[Raid] ========== RAID #" .. raidCount .. " START ==========")
+
+        local portalIndex = createOwnRaid()
+        if portalIndex then
+            task.wait(1)
+            local entered = tweenToPortal(portalIndex)
+            if entered then
+                print("[Raid] Waiting for raid to load...")
+                repeat
+                    task.wait(0.5)
+                until (function()
+                    for _, obj in pairs(workspace.__THINGS.Breakables:GetChildren()) do
+                        if obj:IsA("Model") then return true end
+                    end
+                    return false
+                end)()
+                print("[Raid] Raid loaded ✓")
+                breakBoxes()
+                fightAllBosses()
+                openChests()
+            end
+        end
+
+        exitRaid()
+        print("[Raid] ========== RAID #" .. raidCount .. " COMPLETE ==========")
+    end
+end)
+
+-- ===== CLEANUP =====
+_G.RaidBotRunning = false
+if err then
+    warn("[Raid] Bot stopped with error: " .. tostring(err))
+else
+    print("[Raid] Bot stopped.")
+end
